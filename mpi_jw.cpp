@@ -161,8 +161,8 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs){
 //fill nearest bins from other rank
   int DONETAG=num_parts+10000;
-    int nreceive[num_procs]={ };
-    int nreceivereduced[num_procs]={ };
+  int nreceive[num_procs]={ };
+  int nreceivereduced[num_procs]={ };
   if (rank<nprocs_per_side*nprocs_per_side){
     //clear the nearest bins out of rank
     for (int i=0;i<isize+2;i+= isize+1){
@@ -196,9 +196,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		    }
 		    else{
 		        MPI_Isend(p,1,PARTICLE,newrank,p-parts,MPI_COMM_WORLD,&request);
-			MPI_Wait(&request,MPI_STATUS_IGNORE);
+	//		MPI_Wait(&request,MPI_STATUS_IGNORE);
                         nreceive[newrank]++;
-
 		    }
 		}
             }
@@ -206,7 +205,6 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     }
   }
     MPI_Allreduce(nreceive,nreceivereduced,num_procs,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Barrier(MPI_COMM_WORLD);
 
   if (rank<nprocs_per_side*nprocs_per_side){
     for (int cc=0;cc<nreceivereduced[rank];cc++){
@@ -214,13 +212,10 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         particle_t * particle = new particle_t();
         MPI_Recv(particle,1,PARTICLE,MPI_ANY_SOURCE,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
 	int loc = status.MPI_TAG;
-
 	parts[loc]=*particle;
         int bin_row = particle->y / bin_size -istart+1; // Floor.
         int bin_col = particle->x / bin_size -jstart+1; // Floor.
-
         (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
-
     }
   }
     MPI_Barrier(MPI_COMM_WORLD);
@@ -296,7 +291,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	MPI_Isend(0,0,PARTICLE,rank+nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
     }
   }
-    MPI_Barrier(MPI_COMM_WORLD);
+  // MPI_Barrier(MPI_COMM_WORLD);
 //receive particle data
   if (rank<nprocs_per_side*nprocs_per_side){
     int proci = rank%nprocs_per_side;
@@ -391,9 +386,15 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
       }
     }
 */}
+
+  MPI_Barrier(MPI_COMM_WORLD);
 }
 
 void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs){
+    if (rank==0){
+        cout<<"gathering data"<<endl;
+	cout.flush();
+    }
     int DONETAG = num_parts+100;
     MPI_Request request;
     if (rank >0 && rank<nprocs_per_side*nprocs_per_side){
