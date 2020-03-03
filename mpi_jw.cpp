@@ -68,10 +68,13 @@ vector<vector<vector<bin_t*>*>*> *collision_bins;  // TODO: Rename to adjacent_b
 vector<vector<particle_t*>*> *track;
 // Make bins .1% larger to account for rounding error in size computation.
 // TODO: How does this affect scaling?
-#define OVERFILL 1.001
+#define OVERFILL 1.0
 
 void init_simulation(particle_t* parts, int num_parts, double size,int rank, int num_procs) {
-    cout << "Initializing simulation...\n";
+    if (rank==0){
+        cout << "Initializing simulation...\n";
+	cout.flush();
+    }
 
 	// You can use this space to initialize static, global data objects
     // that you may need. This function will be called once before the
@@ -93,7 +96,7 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 	cout.flush();
     }
     // Create bins.
-    cout << "Creating bins...\n";
+   // cout << "Creating bins...\n";
 
     bins = new vector<vector<bin_t*>*>();
     if (rank<nprocs_per_side*nprocs_per_side){
@@ -113,7 +116,7 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
         }
     
         // Bin particles.
-        cout << "Binning particles...\n";
+     //   cout << "Binning particles...\n";
         for (int i = 0; i < num_parts; i++) {
             particle_t *p = parts + i;
     
@@ -132,7 +135,7 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 //        for (int i =0 ; i< omp_get_num_procs();i++){
  //           track->push_back(new vector<particle_t*>());
  //       }
-        cout << "Creating collision bins...\n";
+       // cout << "Creating collision bins...\n";
         collision_bins = new vector<vector<vector<bin_t*>*>*>();  // TODO: Having nested pointers is stupid in this case (even the top-most pointer isn't needed).
         for (int i = istart; i < iend; i++) {
 	    
@@ -157,7 +160,6 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs){
 //fill nearest bins from other rank
-  static int co=0;
   int DONETAG=num_parts+10000;
     int nreceive[num_procs]={ };
     int nreceivereduced[num_procs]={ };
@@ -194,6 +196,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		    }
 		    else{
 		        MPI_Isend(p,1,PARTICLE,newrank,p-parts,MPI_COMM_WORLD,&request);
+			MPI_Wait(&request,MPI_STATUS_IGNORE);
                         nreceive[newrank]++;
 
 		    }
@@ -203,18 +206,24 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     }
   }
     MPI_Allreduce(nreceive,nreceivereduced,num_procs,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+
   if (rank<nprocs_per_side*nprocs_per_side){
     for (int cc=0;cc<nreceivereduced[rank];cc++){
         MPI_Status status;
         particle_t * particle = new particle_t();
         MPI_Recv(particle,1,PARTICLE,MPI_ANY_SOURCE,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
 	int loc = status.MPI_TAG;
+
 	parts[loc]=*particle;
         int bin_row = particle->y / bin_size -istart+1; // Floor.
         int bin_col = particle->x / bin_size -jstart+1; // Floor.
+
         (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
+
     }
   }
+    MPI_Barrier(MPI_COMM_WORLD);
     if (rank<nprocs_per_side*nprocs_per_side){
     // send particles at border to nearest rank
     if (iend<num_bins_per_side){
@@ -222,17 +231,17 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	//send final rows to next rank
 	    vector<particle_t*> * particles = (*(*bins)[isize])[j]->particles;
 	    for (int l=0;l<particles->size();l++){
-	        MPI_Isend((*particles)[l],1,PARTICLE,rank+1,0,MPI_COMM_WORLD,&request);
+	        MPI_Isend((*particles)[l],1,PARTICLE,rank+1,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 	    }
 	    if ((jend<num_bins_per_side)&&(j==jsize)){
 	        for (int l=0;l<particles->size();l++){
-	            MPI_Isend((*particles)[l],1,PARTICLE,rank+1+nprocs_per_side,0,MPI_COMM_WORLD,&request);
+	            MPI_Isend((*particles)[l],1,PARTICLE,rank+1+nprocs_per_side,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 		}
 		MPI_Isend(0,0,PARTICLE,rank+1+nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
             }
 	    else if ((jstart>0)&&(j==1)){
 	        for (int l=0;l<particles->size();l++){
-	            MPI_Isend((*particles)[l],1,PARTICLE,rank+1-nprocs_per_side,0,MPI_COMM_WORLD,&request);
+	            MPI_Isend((*particles)[l],1,PARTICLE,rank+1-nprocs_per_side,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 		}
 		MPI_Isend(0,0,PARTICLE,rank+1-nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
 	    }
@@ -245,18 +254,18 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	//send first row to last rank
 	    vector<particle_t*> * particles = (*(*bins)[1])[j]->particles;
 	    for (int l=0;l<particles->size();l++){
-	        MPI_Isend((*particles)[l],1,PARTICLE,rank-1,0,MPI_COMM_WORLD,&request);
+	        MPI_Isend((*particles)[l],1,PARTICLE,rank-1,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 	    }
 	    if ((jend<num_bins_per_side)&&(j==jsize)){
 	        for (int l=0;l<particles->size();l++){
-	            MPI_Isend((*particles)[l],1,PARTICLE,rank-1+nprocs_per_side,0,MPI_COMM_WORLD,&request);
+	            MPI_Isend((*particles)[l],1,PARTICLE,rank-1+nprocs_per_side,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 
 		}
 		MPI_Isend(0,0,PARTICLE,rank-1+nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
             }
 	    else if ((jstart>0)&&(j==1)){
 	        for (int l=0;l<particles->size();l++){
-	            MPI_Isend((*particles)[l],1,PARTICLE,rank-1-nprocs_per_side,0,MPI_COMM_WORLD,&request);
+	            MPI_Isend((*particles)[l],1,PARTICLE,rank-1-nprocs_per_side,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 		}
 		MPI_Isend(0,0,PARTICLE,rank-1-nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
 	    }
@@ -270,7 +279,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	//send first row to last rank
 	    vector<particle_t*> * particles = (*(*bins)[i])[1]->particles;
 	    for (int l=0;l<particles->size();l++){
-	        MPI_Isend((*particles)[l],1,PARTICLE,rank-nprocs_per_side,0,MPI_COMM_WORLD,&request);
+	        MPI_Isend((*particles)[l],1,PARTICLE,rank-nprocs_per_side,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 	    }
 	}
 	MPI_Isend(0,0,PARTICLE,rank-nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
@@ -281,7 +290,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	//send first row to last rank
 	    vector<particle_t*> * particles = (*(*bins)[i])[jsize]->particles;
 	    for (int l=0;l<particles->size();l++){
-	        MPI_Isend((*particles)[l],1,PARTICLE,rank+nprocs_per_side,0,MPI_COMM_WORLD,&request);
+	        MPI_Isend((*particles)[l],1,PARTICLE,rank+nprocs_per_side,(*particles)[l]-parts,MPI_COMM_WORLD,&request);
 	    }
 	}
 	MPI_Isend(0,0,PARTICLE,rank+nprocs_per_side,DONETAG,MPI_COMM_WORLD,&request);
@@ -300,11 +309,12 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	            MPI_Status status;
 	            particle_t * particle = new particle_t();
 	            MPI_Recv(particle,1,PARTICLE,nearank,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-	    	    if (status.MPI_TAG == DONETAG) break;
-	    	    particle_t *p = particle;
-                    int bin_row = p->y / bin_size -istart+1; // Floor.
-                    int bin_col = p->x / bin_size -jstart+1; // Floor.
-                    (*((*bins)[bin_row]))[bin_col]->particles->push_back(p);
+		    int loc = status.MPI_TAG;
+	    	    if (loc == DONETAG) break;
+	    	    parts[loc] = *particle;
+                    int bin_row = particle->y / bin_size -istart+1; // Floor.
+                    int bin_col = particle->x / bin_size -jstart+1; // Floor.
+                    (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
 		}
 	    }
 	}
@@ -329,16 +339,21 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
                         apply_force(*particle, *colliding_particle);
                     }
                 }
-                move(*particle,size);
             }
         }
     }
-/*
+
     // Move particles.
-    for (int i = 0; i < num_parts; ++i) {
-        move(parts[i], size);
+    for (int i = 1; i < (isize+1); i++) {
+        for (int j = 1; j < (jsize+1); j++) {
+            vector<particle_t*> *particles = (*((*bins)[i]))[j]->particles;
+	    for (int l=0;l<particles->size();l++){
+	        move(*(*particles)[l],size);
+	    }
+	}
     }
-*/
+
+
     // Re-bin particles.
     /*
     for (int i = 0; i < num_bins_per_side; i++) {
@@ -380,19 +395,19 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
 void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs){
     int DONETAG = num_parts+100;
+    MPI_Request request;
     if (rank >0 && rank<nprocs_per_side*nprocs_per_side){
         for (int i = 1;i<isize+1;i++){
             for (int j=1;j<jsize+1;j++){
                 vector<particle_t*> *particlefrombins=(*(*bins)[i])[j]->particles;
                 for (int l=0;l<particlefrombins->size();l++){
                     particle_t* p = (*particlefrombins)[l];
-                    MPI_Send(p,1,PARTICLE,0,p-parts,MPI_COMM_WORLD);
+                    MPI_Isend(p,1,PARTICLE,0,p-parts,MPI_COMM_WORLD,&request);
         	}
             }
         }
-	MPI_Send(0,0,PARTICLE,0,DONETAG,MPI_COMM_WORLD);
+	MPI_Isend(0,0,PARTICLE,0,DONETAG,MPI_COMM_WORLD,&request);
     }
-    
     if (rank==0){
         int donecc =0;
         MPI_Status status;
@@ -407,4 +422,5 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
 	    parts[loc]=*p0;
         }
     }
+    MPI_Barrier(MPI_COMM_WORLD);
 }
