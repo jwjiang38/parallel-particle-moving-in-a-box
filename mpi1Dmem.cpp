@@ -54,6 +54,7 @@ typedef struct bin_t {
 
 MPI_Request request;
 MPI_Request request1;
+MPI_Request request2;
 int num_bins_per_side;
 double bin_size;
 int nprocs_per_side;
@@ -70,7 +71,6 @@ vector<bin_t*> * binstosend;
 vector<int> * ranktosend;
 vector<int> *nearank;
 vector<vector<vector<bin_t*>*>*> *collision_bins;  // TODO: Rename to adjacent_bins.
-vector<vector<particle_t*>*> *track;
 // Make bins .1% larger to account for rounding error in size computation.
 // TODO: How does this affect scaling?
 #define OVERFILL 1.0
@@ -232,8 +232,6 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs){
 //fill nearest bins from other rank
   int DONETAG=num_parts+10000;
- // int nreceive[num_procs]={ };
- // int nreceivereduced[num_procs]={ };
   if (rank<nworkrank){
     //clear the nearest bins out of rank
         for (int j=0;j<num_bins_per_side;j++){
@@ -243,7 +241,6 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
             (*((*bins)[isize+1]))[j]->particles->clear();
         }
     // Re-bin particles.
-
     for (int i = 1; i < isize+1; i++) {
         for (int j = 0; j < num_bins_per_side; j++) {
             vector<particle_t*> *particles = (*((*bins)[i]))[j]->particles;  // TODO: Does saving this cause iteration issues?
@@ -279,7 +276,10 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
   if (rank<nworkrank-1){
       MPI_Isend(0,0,PARTICLE,rank+1,DONETAG,MPI_COMM_WORLD,&request);   
   }
-
+/*  if (rank==1){
+      cout<<"send rebin particles"<<endl;
+      cout.flush();
+  }*/
 //  if (rank<nworkrank){
 /*    for (int cc=0;cc<nreceivereduced[rank];cc++){
         MPI_Status status;
@@ -295,7 +295,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
   //receive rebinned particles
   if (rank>0){
       MPI_Status status;
-      particle_t* particle = new particle_t();
+      particle_t* particle = new(nothrow) particle_t();
       while(1){
           MPI_Recv(particle,1,PARTICLE,rank-1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
           int loc = status.MPI_TAG;
@@ -303,6 +303,10 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
           parts[loc] = *particle;
           int bin_row = particle->y / bin_size -istart+1; // Floor.
           int bin_col = particle->x / bin_size; // Floor.
+/*	    if (rank==1){
+	        cout<<"rank1 will receive rebin data"<<endl;
+		cout.flush();
+	    }*/
 
           (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
 
@@ -311,7 +315,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
   }
   if (rank<nworkrank-1){
       MPI_Status status;
-      particle_t* particle = new particle_t();
+      particle_t* particle = new(nothrow) particle_t();
       while(1){
           MPI_Recv(particle,1,PARTICLE,rank+1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
           int loc = status.MPI_TAG;
@@ -323,10 +327,10 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
       }
   }
     //send ghostzone to nearank
-    vector<particle_t> * particles = new vector<particle_t>();
-    vector<int> *track =  new vector<int>();
     vector<particle_t> * particles1 = new vector<particle_t>();
     vector<int> *track1 =  new vector<int>();
+    vector<particle_t> * particles2 = new vector<particle_t>();
+    vector<int> *track2 =  new vector<int>();
 //    vector<particle_t> * particles2 = new vector<particle_t>();
 //    vector<int> *track2 =  new vector<int>();
 //    vector<particle_t> * particles3 = new vector<particle_t>();
@@ -335,45 +339,17 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         for (int j=0;j<num_bins_per_side;j++){
 	    vector<particle_t*> * binp = (*(*bins)[1])[j]->particles;
             for (int k=0;k<binp->size();k++){
-	        particles->push_back(*(*binp)[k]);
-		track->push_back((*binp)[k]-parts);
-	    }
-        }
-        MPI_Isend(&(*particles)[0],particles->size(),PARTICLE,rank-1,1,MPI_COMM_WORLD,&request1);
-        MPI_Isend(&(*track)[0],track->size(),MPI_INT,rank-1,1,MPI_COMM_WORLD,&request);
-    }
-    if (rank<nworkrank-1){
-        for (int j=0;j<num_bins_per_side;j++){
-	    vector<particle_t*> * binp = (*(*bins)[isize])[j]->particles;
-            for (int k=0;k<binp->size();k++){
 	        particles1->push_back(*(*binp)[k]);
 		track1->push_back((*binp)[k]-parts);
 	    }
         }
-        MPI_Isend(&(*particles1)[0],particles1->size(),PARTICLE,rank+1,1,MPI_COMM_WORLD,&request);
-        MPI_Isend(&(*track1)[0],track1->size(),MPI_INT,rank+1,1,MPI_COMM_WORLD,&request);
+        MPI_Isend(&(*particles1)[0],particles1->size(),PARTICLE,rank-1,1,MPI_COMM_WORLD,&request1);
+        MPI_Isend(&(*track1)[0],track1->size(),MPI_INT,rank-1,1,MPI_COMM_WORLD,&request);
     }
-    MPI_Wait(&request1,MPI_STATUS_IGNORE);
-    particles->clear();
-    track->clear();
+
     if (rank>0){
-        MPI_Status status;
-	particles->resize(num_parts);
-        track->resize(num_parts);
-        MPI_Recv(&(*particles)[0],num_parts,PARTICLE,rank-1,1,MPI_COMM_WORLD,&status);
-        MPI_Recv(&(*track)[0],num_parts,MPI_INT,rank-1,1,MPI_COMM_WORLD,&status);
-	int nparts;
-        MPI_Get_count(&status,MPI_INT,&nparts);
-	for (int i=0;i<nparts;i++){
-	    particle_t *particle = &(*particles)[i];
-	    int loc = (*track)[i];
-            parts[loc]= *particle;
-            int bin_row = particle->y / bin_size -istart+1; // Floor.
-            int bin_col = particle->x / bin_size; // Floor.
-            (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
-	}
+        MPI_Wait(&request1,MPI_STATUS_IGNORE);
     }
-    MPI_Wait(&request,MPI_STATUS_IGNORE);
     particles1->clear();
     track1->clear();
     if (rank<nworkrank-1){
@@ -382,8 +358,6 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         track1->resize(num_parts);
         MPI_Recv(&(*particles1)[0],num_parts,PARTICLE,rank+1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
         MPI_Recv(&(*track1)[0],num_parts,MPI_INT,rank+1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
-
 	int nparts;
         MPI_Get_count(&status,MPI_INT,&nparts);
 	for (int i=0;i<nparts;i++){
@@ -395,6 +369,55 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
             (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
 	}
     }
+    if (rank<nworkrank-1){
+        for (int j=0;j<num_bins_per_side;j++){
+	    vector<particle_t*> * binp = (*(*bins)[isize])[j]->particles;
+            for (int k=0;k<binp->size();k++){
+	        particles2->push_back(*(*binp)[k]);
+		track2->push_back((*binp)[k]-parts);
+	    }
+        }
+        MPI_Isend(&(*particles2)[0],particles2->size(),PARTICLE,rank+1,1,MPI_COMM_WORLD,&request2);
+        MPI_Isend(&(*track2)[0],track2->size(),MPI_INT,rank+1,1,MPI_COMM_WORLD,&request);
+    }
+    if (rank<nworkrank-1){
+        MPI_Wait(&request2,MPI_STATUS_IGNORE);
+    }
+
+    particles2->clear();
+    track2->clear();
+
+    if (rank>0){
+        MPI_Status status;
+	particles2->resize(num_parts);
+        track2->resize(num_parts);
+        MPI_Recv(&(*particles2)[0],num_parts,PARTICLE,rank-1,1,MPI_COMM_WORLD,&status);
+        MPI_Recv(&(*track2)[0],num_parts,MPI_INT,rank-1,1,MPI_COMM_WORLD,&status);
+
+	int nparts;
+        MPI_Get_count(&status,MPI_INT,&nparts);
+	for (int i=0;i<nparts;i++){
+	    particle_t *particle = &(*particles2)[i];
+	    int loc = (*track2)[i];
+            parts[loc]= *particle;
+            int bin_row = particle->y / bin_size -istart+1; // Floor.
+            int bin_col = particle->x / bin_size; // Floor.
+            (*((*bins)[bin_row]))[bin_col]->particles->push_back(parts+loc);
+	}
+    }
+    if (rank==1){
+        cout<<"receive ghostzone"<<endl;
+	cout.flush();
+    }
+    free(particles1);
+    particles1=NULL;
+    free(track1);
+    track1=NULL;
+    free(particles2);
+    free(track2);
+    particles2=NULL;
+    track2=NULL;
+    
   // MPI_Barrier(MPI_COMM_WORLD);
 //receive particle data
 /*
@@ -489,7 +512,9 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	(*track)[i]->clear();
       }
     }
-*/}
+   
+*/
+  }
 }
 
 void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs){
