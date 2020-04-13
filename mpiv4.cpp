@@ -8,6 +8,36 @@ using namespace std;
 #define min(a,b) (((a)<(b))?(a):(b))
 #define max(a,b) (((a)<(b))?(b):(a))
 // Apply the force from neighbor to particle
+
+int const MAPBIN=6;
+typedef struct bin_t {
+    particle_t* particles[MAPBIN];
+    int nparts=0;
+    int nearbins[9];
+    int nnbins=0;
+} bin_t;
+
+MPI_Request request;
+int num_bins_per_side;
+double bin_size;
+int nprocs_per_side;
+int nworkrank;
+int nbins_per_procside;
+int  jstart;
+int  jend;
+int  istart;
+int  iend;
+int  isize;
+int  jsize;
+bin_t* bins;
+vector<int> *binstosend;
+vector<int> *ranktosend;
+vector<int> *nearank;
+//bin_t** collision_bins;  // TODO: Rename to adjacent_bins.
+// Make bins .1% larger to account for rounding error in size computation.
+// TODO: How does this affect scaling?
+#define OVERFILL 1.0
+
 void apply_force(particle_t& particle, particle_t& neighbor) {
     // Calculate Distance
     double dx = neighbor.x - particle.x;
@@ -47,34 +77,6 @@ void move(particle_t& p, double size) {
         p.vy = -p.vy;
     }
 }
-int const MAPBIN=6;
-typedef struct bin_t {
-    particle_t* particles[MAPBIN];
-    int nparts=0;
-    int nearbins[9];
-    int nnbins=0;
-} bin_t;
-
-MPI_Request request;
-int num_bins_per_side;
-double bin_size;
-int nprocs_per_side;
-int nworkrank;
-int nbins_per_procside;
-int  jstart;
-int  jend;
-int  istart;
-int  iend;
-int  isize;
-int  jsize;
-bin_t* bins;
-vector<bin_t*> *binstosend;
-vector<int> *ranktosend;
-vector<int> *nearank;
-//bin_t** collision_bins;  // TODO: Rename to adjacent_bins.
-// Make bins .1% larger to account for rounding error in size computation.
-// TODO: How does this affect scaling?
-#define OVERFILL 1.0
 
 void init_simulation(particle_t* parts, int num_parts, double size,int rank, int num_procs) {
     if (rank==0){
@@ -117,89 +119,83 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 	 isize = iend-istart;
 	 jsize = jend-jstart;
          bins = new bin_t[(isize+2)*(jsize+2)]();
-        for (int i=0;i<isize+2;i++){
-	    for (int j=0;j<jsize+2;j++){
-	        bins[i+j*(jsize+2)].nnbins=0;
-		bins[i+j*(jsize+2)].nparts=0;
-	    }
-	}
+         binstosend = new vector<int>();
+	 ranktosend = new vector<int>();
+         nearank = new vector<int>;
 
         // Bin particles.
-	if (rank==7){
-        cout << "Binning particles...\n";
-	cout.flush();
-	}
         for (int i = 0; i < num_parts; i++) {
             particle_t *p = parts + i;
     
             int bin_row = p->y / bin_size; // Floor.
             int bin_col = p->x / bin_size; // Floor.
 	    if ((bin_row>=istart)&&(bin_row<iend)&&(bin_col>=jstart)&&(bin_col<jend)){
-	        bin_t* thisbin =&(bins[bin_row-istart+1+(bin_col-jstart+1)*(jsize+2)]);
+	        bin_t* thisbin =&(bins[bin_row-istart+1+(bin_col-jstart+1)*(isize+2)]);
 	        thisbin->particles[thisbin->nparts]=p;
 	        thisbin->nparts+=1;
             }
 	}
+        for (int i = istart; i < iend; i++) {
+	    
+            int iid = i-istart+1;
+            for (int j = jstart; j < jend; j++) {
+		int jid = j-jstart+1;
+                for (int k = i - 1; k < i + 2; k++) {
+                    for (int l = j - 1; l < j + 2; l++) {
+                        if (k >= 0 && l >= 0 && k < num_bins_per_side && l < num_bins_per_side) {
+                            bins[iid+jid*(isize+2)].nearbins[bins[iid+jid*(isize+2)].nnbins]=k-istart+1+(l-jstart+1)*(isize+2);  // NOTE: Indexing must be UD/LR otherwise correctness against ref implementation will fail.
+                            bins[iid+jid*(isize+2)].nnbins+=1;  // NOTE: Indexing must be UD/LR otherwise correctness against ref implementation will fail.
+                        }
+                    }
+                }
+            }
+        }
 
-        binstosend = new vector<bin_t*>();
-	ranktosend = new vector<int>();
-	if (rank==7){
-        cout << "binstosend...\n";
-	cout.flush();
-	}
         if (istart>0){
             for (int j=1;j<(jsize+1);j++){
-	        binstosend->push_back(&(bins[1+j*(jsize+2)]));
+	        binstosend->push_back(1+j*(isize+2));
 		ranktosend->push_back(rank-1);
                 if ((jend<num_bins_per_side)&&(j==jsize)){
-		    binstosend->push_back(&(bins[1+j*(jsize+2)]));
+		    binstosend->push_back(1+j*(isize+2));
 		    ranktosend->push_back(rank-1+nprocs_per_side);
             	}
                 else if ((jstart>0)&&(j==1)){
-		    binstosend->push_back(&(bins[1+j*(jsize+2)]));
+		    binstosend->push_back(1+j*(isize+2));
 		    ranktosend->push_back(rank-1-nprocs_per_side);
                 }
             }
         }
-	if (rank==7){
-	    cout<<bins[3+jsize+2].nnbins<<endl;
-	    cout.flush();
-	}
 
         if (iend<num_bins_per_side){
             for (int j=1;j<(jsize+1);j++){
-	        binstosend->push_back(&(bins[isize+j*(jsize+2)]));
+	        binstosend->push_back(isize+j*(isize+2));
 		ranktosend->push_back(rank+1);
                 if ((jend<num_bins_per_side)&&(j==jsize)){
-		    binstosend->push_back(&(bins[isize+j*(jsize+2)]));
+		    binstosend->push_back(isize+j*(isize+2));
 		    ranktosend->push_back(rank+1+nprocs_per_side);
                 }
                 else if ((jstart>0)&&(j==1)){
-		    binstosend->push_back(&(bins[isize+j*(jsize+2)]));
+		    binstosend->push_back(isize+j*(isize+2));
 		    ranktosend->push_back(rank+1-nprocs_per_side);
                 }
             }
         }
         if (jstart>0){
             for (int i=1;i<(isize+1);i++){
-	        binstosend->push_back(&(bins[i+jsize+2]));
+	        binstosend->push_back(i+isize+2);
 		ranktosend->push_back(rank-nprocs_per_side);
             }
 	}
         if (jend<num_bins_per_side){
             //send last column to rank+nprocs_per_side
             for (int i=1;i<(isize+1);i++){
-	        binstosend->push_back(&(bins[i+jsize*(jsize+2)]));
+	        binstosend->push_back(i+jsize*(isize+2));
 		ranktosend->push_back(rank+nprocs_per_side);
             }
 	}
 
-	if (rank==7){
-        cout << "ranktosend\n";
-	cout.flush();
-	}
     //get near rank list
-    nearank = new vector<int>;
+
     if (istart>0){
         nearank->push_back(rank-1);
 	if (jstart>0){
@@ -232,31 +228,7 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 //        for (int i =0 ; i< omp_get_num_procs();i++){
  //           track->push_back(new vector<particle_t*>());
  //       }
-	if (rank==15){
-        cout << "nnbins\n";
-	cout<<istart<<" "<<iend<<" "<<jstart<<" "<<jend<<endl;
-	cout.flush();
-	}
-        for (int i = istart; i < iend; i++) {
-	    
-            int iid = i-istart+1;
-            for (int j = jstart; j < jend; j++) {
-		int jid = j-jstart+1;
-                for (int k = i - 1; k < i + 2; k++) {
-                    for (int l = j - 1; l < j + 2; l++) {
-                        if (k >= 0 && l >= 0 && k < num_bins_per_side && l < num_bins_per_side) {
-                            if (rank==15){
-			        cout<<k<<" "<<l<<endl;
-				cout.flush();
-				cout<<bins[iid+jid*(jsize+2)].nnbins<<endl;
-			    }
-                            bins[iid+jid*(jsize+2)].nearbins[bins[iid+jid*(jsize+2)].nnbins]=k-istart+1+(l-jstart+1)*(jsize+2);  // NOTE: Indexing must be UD/LR otherwise correctness against ref implementation will fail.
-                            bins[iid+jid*(jsize+2)].nnbins+=1;  // NOTE: Indexing must be UD/LR otherwise correctness against ref implementation will fail.
-                        }
-                    }
-                }
-            }
-        }
+
 
 
     }
@@ -266,35 +238,27 @@ void init_simulation(particle_t* parts, int num_parts, double size,int rank, int
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs){
 //fill nearest bins from other rank
   int DONETAG=num_parts+10000;
-  if (rank==15){
-      cout<<"start simulation"<<endl;
-      cout.flush();
-  }
  // int nreceive[num_procs]={ };
  // int nreceivereduced[num_procs]={ };
   if (rank<nworkrank){
     //clear the nearest bins out of rank
     for (int i=0;i<isize+2;i+= isize+1){
         for (int j=0;j<jsize+2;j++){
-            bins[i+j*(jsize+2)].nparts=0;
+            bins[i+j*(isize+2)].nparts=0;
         }
     }
     for (int j=0;j<jsize+2;j+=jsize+1){
         for (int i=1;i<isize+1;i++){
-            bins[i+j*(jsize+2)].nparts=0;
+            bins[i+j*(isize+2)].nparts=0;
 	}
     }
     // Re-bin particles.
-  if (rank==15){
-      cout<<"rebin"<<endl;
-      cout.flush();
-  }
 
     for (int i = 1; i < isize+1; i++) {
         for (int j = 1; j < jsize+1; j++) {
-	    particle_t** particles = bins[i+j*(jsize+2)].particles;
-            for (int k = 0; k < bins[i+j*(jsize+2)].nparts; k++) {
-                particle_t *p = particles[k];
+	    bin_t* thisbin= &bins[i+j*(isize+2)];
+            for (int k = 0; k < thisbin->nparts; k++) {
+                particle_t *p = thisbin->particles[k];
 
                 int bin_row = p->y / bin_size; // Floor.
                 int bin_col = p->x / bin_size; // Floor.
@@ -302,15 +266,15 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
                 if (bin_row != i+istart-1 || bin_col != j+jstart-1) {
                     // Remove from current bin.
-		    for (int l=k;l<bins[i+j*(jsize+2)].nparts-1;l++){
-		        particles[l]=particles[l+1];
+		    for (int l=k;l<(thisbin->nparts-1);l++){
+		        thisbin->particles[l]=thisbin->particles[l+1];
 		    }
-		    bins[i+j*(jsize+2)].nparts-=1;
+		    thisbin->nparts-=1;
                     k--;
 		    if (newrank==rank){
-		        bin_t* thisbin = &bins[bin_row-istart+1+(bin_col-jstart+1)*(jsize+2)];
-                        thisbin->particles[thisbin->nparts]=p;
-                        thisbin->nparts+=1;
+		        bin_t* newbin = &bins[bin_row-istart+1+(bin_col-jstart+1)*(isize+2)];
+                        newbin->particles[newbin->nparts]=p;
+                        newbin->nparts+=1;
 		    }
 		    else{
 		        MPI_Isend(p,1,PARTICLE,newrank,p-parts,MPI_COMM_WORLD,&request);
@@ -352,18 +316,14 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	parts[loc] = *particle;
         int bin_row = particle->y / bin_size -istart+1; // Floor.
         int bin_col = particle->x / bin_size -jstart+1; // Floor.
-	bin_t* thisbin = &bins[bin_row+bin_col*(jsize+2)];
+	bin_t* thisbin = &bins[bin_row+bin_col*(isize+2)];
         thisbin->particles[thisbin->nparts]=parts+loc;
         thisbin->nparts+=1;
       }
   }
-  if (rank==15){
-      cout<<"ghost send"<<endl;
-      cout.flush();
-  }
     //send ghostzone to nearank
     for (int i=0;i<ranktosend->size();i++){
-        bin_t* thisbin = (*binstosend)[i];
+        bin_t* thisbin = &bins[(*binstosend)[i]];
         particle_t** particles = thisbin->particles;
         for (int j=0;j<thisbin->nparts;j++){
 	    particle_t* particle = particles[j];
@@ -376,10 +336,6 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         MPI_Isend(0,0,PARTICLE,(*nearank)[i],DONETAG,MPI_COMM_WORLD,&request);   
 	MPI_Wait(&request,MPI_STATUS_IGNORE);
     }
-  if (rank==15){
-      cout<<"ghost receive"<<endl;
-      cout.flush();
-  }
     for (int i=0;i<nearank->size();i++){
         int temrank = (*nearank)[i];
         MPI_Status status;
@@ -391,8 +347,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
           parts[loc] = *particle;
           int bin_row = particle->y / bin_size -istart+1; // Floor.
           int bin_col = particle->x / bin_size -jstart+1; // Floor.
-          bins[bin_row+bin_col*(jsize+2)].particles[bins[bin_row+bin_col*(jsize+2)].nparts]=parts+loc;
-          bins[bin_row+bin_col*(jsize+2)].nparts+=1;
+          bins[bin_row+bin_col*(isize+2)].particles[bins[bin_row+bin_col*(isize+2)].nparts]=parts+loc;
+          bins[bin_row+bin_col*(isize+2)].nparts+=1;
 
         }
     }
@@ -420,13 +376,9 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	}
     }
     */
-  if (rank==15){
-      cout<<"force"<<endl;
-      cout.flush();
-  }
     for (int i = 1; i < (isize+1); i++) {
         for (int j = 1; j < (jsize+1); j++) {
-            bin_t* thisbin = &bins[i+j*(jsize+2)];
+            bin_t* thisbin = &bins[i+j*(isize+2)];
             particle_t** particles = thisbin->particles;
 
             for (int k = 0; k < thisbin->nparts; k++) {
@@ -449,8 +401,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     // Move particles.
     for (int i = 1; i < (isize+1); i++) {
         for (int j = 1; j < (jsize+1); j++) {
-            particle_t** particles = bins[i+j*(jsize+2)].particles;
-	    for (int l=0;l<bins[i+j*(jsize+2)].nparts;l++){
+            particle_t** particles = bins[i+j*(isize+2)].particles;
+	    for (int l=0;l<bins[i+j*(isize+2)].nparts;l++){
 	        move(*(particles[l]),size);
 	    }
 	}
@@ -468,33 +420,18 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
     int DONETAG = num_parts+100;
     MPI_Barrier(MPI_COMM_WORLD);
     MPI_Request request;
-    cout<<nworkrank<<endl;
-    cout.flush();
     if (rank >0 && rank<nworkrank){
         for (int i = 1;i<isize+1;i++){
             for (int j=1;j<jsize+1;j++){
-		    if (rank==7){
-		        cout<<rank<<"now start to send"<<endl;
-			cout.flush();
-		    }
-                particle_t** particlefrombins=bins[i+j*(jsize+2)].particles;
-                for (int l=0;l<bins[i+j*(jsize+2)].nparts;l++){
-		    if (rank==7){
-		        cout<<"sending "<<l<<"out of"<<bins[i+j*(jsize+2)].nparts<<" particles"<<endl;
-			cout.flush();
-		    }
+                particle_t** particlefrombins=bins[i+j*(isize+2)].particles;
+                for (int l=0;l<bins[i+j*(isize+2)].nparts;l++){
                     particle_t* p = particlefrombins[l];
                     MPI_Isend(p,1,PARTICLE,0,p-parts,MPI_COMM_WORLD,&request);
                     MPI_Wait(&request,MPI_STATUS_IGNORE);
-		    if (rank==7){
-		    cout<<l<<"out of"<<bins[i+j*(jsize+2)].nparts<<" particles sent"<<endl;
-		    cout.flush();
-                    }
         	}
             }
         }
 	MPI_Isend(0,0,PARTICLE,0,DONETAG,MPI_COMM_WORLD,&request);
-//	cout<<rank<<" sent"<<endl;
     }
     if (rank==0){
         int donecc =0;
@@ -511,8 +448,4 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
         }
     }
     MPI_Barrier(MPI_COMM_WORLD);
-    if (rank==0){
-        cout<<"gathering data done"<<endl;
-	cout.flush();
-    }
 }
